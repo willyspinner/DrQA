@@ -15,6 +15,7 @@ import importlib.util
 
 from multiprocessing import Pool as ProcessPool
 from tqdm import tqdm
+from functools import partial
 from drqa.retriever import utils
 
 logger = logging.getLogger()
@@ -64,26 +65,30 @@ def iter_files(path):
         raise RuntimeError('Path %s is invalid' % path)
 
 
-def get_contents(filename):
-    """Parse the contents of a file. Each line is a JSON encoded document."""
+def get_contents(filename, from_md):
+    """Parse the contents of a file. Each line is a JSON encoded document, unless from_md is selected."""
     global PREPROCESS_FN
     documents = []
     with open(filename) as f:
-        for line in f:
-            # Parse document
-            doc = json.loads(line)
-            # Maybe preprocess the document with custom function
-            if PREPROCESS_FN:
-                doc = PREPROCESS_FN(doc)
-            # Skip if it is empty or None
-            if not doc:
-                continue
-            # Add the document
-            documents.append((utils.normalize(doc['id']), doc['text']))
+        if from_md:
+            contents = f.read()
+            return [(utils.normalize(filename), contents)]
+        else:
+            for line in f:
+                # Parse document
+                doc = json.loads(line)
+                # Maybe preprocess the document with custom function
+                if PREPROCESS_FN:
+                    doc = PREPROCESS_FN(doc)
+                # Skip if it is empty or None
+                if not doc:
+                    continue
+                # Add the document
+                documents.append((utils.normalize(doc['id']), doc['text']))
     return documents
 
 
-def store_contents(data_path, save_path, preprocess, num_workers=None):
+def store_contents(data_path, save_path, preprocess, num_workers=None, from_md=False):
     """Preprocess and store a corpus of documents in sqlite.
 
     Args:
@@ -93,6 +98,7 @@ def store_contents(data_path, save_path, preprocess, num_workers=None):
         preprocess: Path to file defining a custom `preprocess` function. Takes
           in and outputs a structured doc.
         num_workers: Number of parallel processes to use when reading docs.
+        from_md: if we want to treat docs as markdown docs (instead of direct json files as required by default)
     """
     if os.path.isfile(save_path):
         raise RuntimeError('%s already exists! Not overwriting.' % save_path)
@@ -104,7 +110,10 @@ def store_contents(data_path, save_path, preprocess, num_workers=None):
 
     workers = ProcessPool(num_workers, initializer=init, initargs=(preprocess,))
     files = [f for f in iter_files(data_path)]
+    if from_md:
+        files = [f for f in files if f.endswith('.md')]
     count = 0
+    worker_fn = partial(get_contents, from_md=from_md)
     with tqdm(total=len(files)) as pbar:
         for pairs in tqdm(workers.imap_unordered(get_contents, files)):
             count += len(pairs)
@@ -125,6 +134,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('data_path', type=str, help='/path/to/data')
     parser.add_argument('save_path', type=str, help='/path/to/saved/db.db')
+    parser.add_argument('--from_md', help='autogenerate the required json file from a bunch of md files', action='store_true')
     parser.add_argument('--preprocess', type=str, default=None,
                         help=('File path to a python module that defines '
                               'a `preprocess` function'))
@@ -133,5 +143,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     store_contents(
-        args.data_path, args.save_path, args.preprocess, args.num_workers
+        args.data_path, args.save_path, args.preprocess, args.num_workers, args.from_md
     )
+
+
